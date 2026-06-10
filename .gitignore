@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.vscode
+node_modules
+*.code-workspace
+site
+examples/test/example.bin
