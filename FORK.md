@@ -60,6 +60,14 @@ longer imports v1. Upstream's `go.mod` still requires
      `TestSendKeepsTheStreamInSyncWhenThePeerStalls`,
      `TestSendDropsAFrameThatNeverStarted`,
      `TestSendConcurrentFramesStayInSync`, and the `recvFrame` helper.
+4. **The size of an SDO upload is read from four bytes.** In a block upload's
+   initiate response, the SDO client took the size the server indicates from one
+   byte (`GetBlockSize()`, `raw[4]`) instead of four (`raw[4:8]`, CiA 301). An
+   object of 256 bytes or more, read with block transfer (`SDOClient.ReadAll`),
+   was taken for a shorter one and aborted `0x06070012` (length too high). The
+   client now uses `GetSizeIndicated()`; `GetBlockSize()` stays for the one-byte
+   block count. Test: `TestClientBlockUploadIndicatedSize` (255 to 999 bytes; 300
+   and 600 abort without the fix).
 
 ## What diverges from upstream
 
@@ -72,6 +80,7 @@ Everything else is upstream `main` unchanged. These files differ:
 | `pkg/can/kvaser/` | removed |
 | `pkg/can/all/all.go` | no kvaser import; fork note |
 | `pkg/can/virtual/virtual.go`, `virtual_test.go` | our VirtualCAN stream changes |
+| `pkg/sdo/common.go`, `pkg/sdo/client.go`, `pkg/network/client_test.go` | the upload size read from four bytes |
 | `FORK.md` | this file |
 
 ## Tests
@@ -90,10 +99,6 @@ the body) to every other client.
   `-race`. The races are in the tests: a `bytes.Buffer` log sink read while the
   logger writes to it, and a package-level slice appended from the EMCY
   callback.
-- In a block upload, the SDO client takes the size the server indicates from
-  one byte (`GetBlockSize()`, `raw[4]`) instead of four (`raw[4:8]`). Reading an
-  object of 256 bytes or more with block transfer (`SDOClient.ReadAll`) can
-  then abort with `0x06070012` (length too high).
 
 ## Re-enabling Kvaser (future work)
 

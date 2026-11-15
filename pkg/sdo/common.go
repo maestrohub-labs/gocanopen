@@ -311,6 +311,12 @@ func (response *SDOMessage) GetBlockSize() uint8 {
 	return response.raw[4]
 }
 
+// GetSizeIndicated is the data size an upload initiate response indicates
+// when its s bit is set: four bytes, little endian (CiA 301, bytes 4 to 7)
+func (response *SDOMessage) GetSizeIndicated() uint32 {
+	return binary.LittleEndian.Uint32(response.raw[4:8])
+}
+
 func (response *SDOMessage) GetNumberOfSegments() uint8 {
 	return response.raw[1]
 }

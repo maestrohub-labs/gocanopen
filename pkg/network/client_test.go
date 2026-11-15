@@ -120,6 +120,36 @@ func TestClientBlock(t *testing.T) {
 	})
 }
 
+// The size a server indicates in its block upload initiate response is four
+// bytes (CiA 301, bytes 4 to 7). Read from one byte, an object of 256 bytes or
+// more was taken for a shorter one and its upload aborted 0x06070012 (data
+// too long) once more than that byte's value had arrived.
+func TestClientBlockUploadIndicatedSize(t *testing.T) {
+	network := CreateNetworkTest()
+	network2 := CreateNetworkEmptyTest()
+	defer network.Disconnect()
+	defer network2.Disconnect()
+	node := network.controllers[NodeIdTest].GetNode()
+
+	for i, size := range []int{255, 256, 300, 600, 999} {
+		file, err := os.CreateTemp(t.TempDir(), "block-upload")
+		assert.Nil(t, err)
+		data := make([]byte, size)
+		for j := range data {
+			data[j] = byte(j * 7)
+		}
+		_, err = file.Write(data)
+		assert.Nil(t, err)
+		assert.Nil(t, file.Close())
+		index := uint16(0x3340 + i)
+		node.GetOD().AddFile(index, "File entry", file.Name(), os.O_RDONLY, os.O_RDONLY)
+
+		read, err := network2.ReadAll(NodeIdTest, index, 0)
+		assert.Nil(t, err, "%d bytes", size)
+		assert.Equal(t, data, read, "%d bytes", size)
+	}
+}
+
 type blockSizeSpy struct {
 	mu    sync.Mutex
 	sizes []uint8
