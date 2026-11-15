@@ -1,6 +1,8 @@
 package virtual
 
 import (
+	"errors"
+	"io"
 	"net"
 	"sync"
 	"testing"
@@ -124,6 +126,144 @@ func TestRecvNoMessage(t *testing.T) {
 	received, err := vcan.Recv()
 	require.NoError(t, err)
 	assert.Equal(t, frame, *received)
+}
+
+// A frame that the deadline cuts short is finished, so that the peer does not
+// read the rest of it as the next frame's length
+func TestSendFinishesAFrameCutShort(t *testing.T) {
+	vcan, remote := newPipedVcan(t)
+
+	first := canopen.Frame{ID: 0x190, Flags: 0, DLC: 2, Data: [8]byte{0x01, 0x02}}
+	second := canopen.Frame{ID: 0x290, Flags: 0, DLC: 1, Data: [8]byte{0x03}}
+	firstBytes, err := serializeFrame(first)
+	require.NoError(t, err)
+	secondBytes, err := serializeFrame(second)
+	require.NoError(t, err)
+
+	// The peer takes a few bytes of the first frame, then stalls for longer
+	// than the send deadline
+	_ = remote.SetReadDeadline(time.Now().Add(3 * time.Second))
+	got := make(chan []byte, 1)
+	go func() {
+		buf := make([]byte, len(firstBytes)+len(secondBytes))
+		_, _ = io.ReadFull(remote, buf[:3])
+		time.Sleep(5 * sendTimeout)
+		_, _ = io.ReadFull(remote, buf[3:])
+		got <- buf
+	}()
+
+	require.NoError(t, vcan.Send(first))
+	require.NoError(t, vcan.Send(second))
+	select {
+	case buf := <-got:
+		assert.Equal(t, append(firstBytes, secondBytes...), buf)
+	case <-time.After(5 * time.Second):
+		t.Fatal("frames never reached the peer")
+	}
+}
+
+// A frame that cannot be finished closes the connection rather than leaving
+// the stream out of sync
+func TestSendClosesTheConnectionWhenAFrameCannotBeFinished(t *testing.T) {
+	vcan, remote := newPipedVcan(t)
+
+	frame := canopen.Frame{ID: 0x190, Flags: 0, DLC: 2, Data: [8]byte{0x01, 0x02}}
+	read := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 3)
+		_, _ = io.ReadFull(remote, buf)
+		// Stall longer than frameTimeout, then the connection must be gone
+		time.Sleep(frameTimeout + 200*time.Millisecond)
+		_ = remote.SetReadDeadline(time.Now().Add(time.Second))
+		_, err := remote.Read(make([]byte, 64))
+		read <- err
+	}()
+
+	assert.Error(t, vcan.Send(frame))
+	select {
+	case err := <-read:
+		assert.ErrorIs(t, err, io.EOF)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the peer's read never returned")
+	}
+}
+
+// A frame that could not start before the deadline is dropped whole, the next
+// one arrives intact
+func TestSendDropsAFrameThatNeverStarted(t *testing.T) {
+	vcan, remote := newPipedVcan(t)
+
+	dropped := canopen.Frame{ID: 0x190, Flags: 0, DLC: 2, Data: [8]byte{0x01, 0x02}}
+	next := canopen.Frame{ID: 0x290, Flags: 0, DLC: 1, Data: [8]byte{0x03}}
+
+	// Nobody reads yet, so nothing of the first frame is sent
+	assert.Error(t, vcan.Send(dropped))
+
+	peer := newVcan("")
+	peer.conn = remote
+	type result struct {
+		frame *canopen.Frame
+		err   error
+	}
+	received := make(chan result, 1)
+	go func() {
+		frame, err := peer.Recv()
+		received <- result{frame, err}
+	}()
+	require.NoError(t, vcan.Send(next))
+	select {
+	case r := <-received:
+		require.NoError(t, r.err)
+		assert.Equal(t, next, *r.frame)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the next frame never arrived")
+	}
+}
+
+// Frames sent from several go routines while the peer reads slowly all arrive
+// whole and in sync, or not at all
+func TestSendConcurrentFramesStayInSync(t *testing.T) {
+	vcan, remote := newPipedVcan(t)
+	peer := newVcan("")
+	peer.conn = remote
+
+	const senders, perSender = 8, 50
+	var wg sync.WaitGroup
+	for s := range senders {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			frame := canopen.Frame{ID: uint32(0x180 + s), Flags: 0, DLC: 8, Data: [8]byte{byte(s), 1, 2, 3, 4, 5, 6, 7}}
+			for range perSender {
+				_ = vcan.Send(frame)
+			}
+		}()
+	}
+	sent := make(chan struct{})
+	go func() { wg.Wait(); close(sent) }()
+
+	received := 0
+	for {
+		frame, err := peer.Recv()
+		if errors.Is(err, ErrNoMsg) {
+			select {
+			case <-sent:
+				assert.Positive(t, received)
+				return
+			default:
+				continue
+			}
+		}
+		require.NoError(t, err, "after %v frames", received)
+		s := int(frame.ID) - 0x180
+		require.True(t, s >= 0 && s < senders, "frame id %x", frame.ID)
+		assert.Equal(t, [8]byte{byte(s), 1, 2, 3, 4, 5, 6, 7}, frame.Data)
+		received++
+		if received%25 == 0 {
+			// A slow reader, so that some writes hit the deadline
+			time.Sleep(3 * sendTimeout)
+		}
+	}
 }
 
 type FrameReceiver struct {
