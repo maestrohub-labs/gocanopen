@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/samsamfire/gocanopen/v2/pkg/gateway"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/gateway"
 )
 
 type GatewayResponse interface {

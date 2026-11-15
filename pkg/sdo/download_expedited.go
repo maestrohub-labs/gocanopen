@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/samsamfire/gocanopen/v2/pkg/od"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/od"
 )
 
 func (s *SDOServer) rxDownloadInitiate(rx SDOMessage) error {

@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/samsamfire/gocanopen/v2/pkg/gateway"
-	"github.com/samsamfire/gocanopen/v2/pkg/nmt"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/gateway"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/nmt"
 )
 
 // Wrapper around [http.ResponseWriter] but keeps track of any writes already done

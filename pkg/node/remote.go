@@ -4,14 +4,14 @@ import (
 	"errors"
 	"log/slog"
 
-	canopen "github.com/samsamfire/gocanopen/v2"
-	"github.com/samsamfire/gocanopen/v2/pkg/config"
-	"github.com/samsamfire/gocanopen/v2/pkg/emergency"
-	"github.com/samsamfire/gocanopen/v2/pkg/nmt"
-	"github.com/samsamfire/gocanopen/v2/pkg/od"
-	"github.com/samsamfire/gocanopen/v2/pkg/pdo"
-	"github.com/samsamfire/gocanopen/v2/pkg/sdo"
-	"github.com/samsamfire/gocanopen/v2/pkg/sync"
+	canopen "github.com/maestrohub-labs/gocanopen/v2"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/config"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/emergency"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/nmt"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/od"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/pdo"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/sdo"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/sync"
 )
 
 // A RemoteNode is a bit different from a [LocalNode].

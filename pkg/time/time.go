@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	canopen "github.com/samsamfire/gocanopen/v2"
-	"github.com/samsamfire/gocanopen/v2/pkg/nmt"
-	"github.com/samsamfire/gocanopen/v2/pkg/od"
+	canopen "github.com/maestrohub-labs/gocanopen/v2"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/nmt"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/od"
 )
 
 // time origin is 1st of jan 1984, midnight UTC

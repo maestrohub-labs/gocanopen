@@ -9,8 +9,8 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 
-	"github.com/samsamfire/gocanopen/v2/pkg/network"
-	"github.com/samsamfire/gocanopen/v2/pkg/od"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/network"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/od"
 )
 
 var DEFAULT_NODE_ID = 0x10

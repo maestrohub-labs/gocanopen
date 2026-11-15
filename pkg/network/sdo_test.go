@@ -10,10 +10,10 @@ import (
 	"testing/iotest"
 	"time"
 
-	canopen "github.com/samsamfire/gocanopen/v2"
-	"github.com/samsamfire/gocanopen/v2/pkg/can/virtual"
-	"github.com/samsamfire/gocanopen/v2/pkg/od"
-	"github.com/samsamfire/gocanopen/v2/pkg/sdo"
+	canopen "github.com/maestrohub-labs/gocanopen/v2"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/can/virtual"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/od"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/sdo"
 	"github.com/stretchr/testify/assert"
 )
 

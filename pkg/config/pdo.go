@@ -4,9 +4,9 @@ import (
 	"errors"
 	"time"
 
-	"github.com/samsamfire/gocanopen/v2/pkg/od"
-	"github.com/samsamfire/gocanopen/v2/pkg/pdo"
-	"github.com/samsamfire/gocanopen/v2/pkg/sdo"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/od"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/pdo"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/sdo"
 )
 
 type PDOMappingParameter struct {

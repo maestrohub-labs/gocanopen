@@ -12,8 +12,8 @@ import (
 	"time"
 	"unsafe"
 
-	canopen "github.com/samsamfire/gocanopen/v2"
-	can "github.com/samsamfire/gocanopen/v2/pkg/can"
+	canopen "github.com/maestrohub-labs/gocanopen/v2"
+	can "github.com/maestrohub-labs/gocanopen/v2/pkg/can"
 	"golang.org/x/sys/unix"
 )
 

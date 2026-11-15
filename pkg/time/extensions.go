@@ -3,8 +3,8 @@ package time
 import (
 	"encoding/binary"
 
-	canopen "github.com/samsamfire/gocanopen/v2"
-	"github.com/samsamfire/gocanopen/v2/pkg/od"
+	canopen "github.com/maestrohub-labs/gocanopen/v2"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/od"
 )
 
 // [TIME] update cob id & if should be producer

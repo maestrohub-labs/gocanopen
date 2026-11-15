@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	canopen "github.com/samsamfire/gocanopen/v2"
+	canopen "github.com/maestrohub-labs/gocanopen/v2"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/sys/unix"
 )

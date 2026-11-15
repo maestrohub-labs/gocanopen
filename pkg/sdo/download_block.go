@@ -3,8 +3,8 @@ package sdo
 import (
 	"fmt"
 
-	"github.com/samsamfire/gocanopen/v2/internal/crc"
-	"github.com/samsamfire/gocanopen/v2/pkg/od"
+	"github.com/maestrohub-labs/gocanopen/v2/internal/crc"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/od"
 )
 
 func (s *SDOServer) rxDownloadBlockInitiate(rx SDOMessage) error {

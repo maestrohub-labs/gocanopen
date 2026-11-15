@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	canopen "github.com/samsamfire/gocanopen/v2"
-	"github.com/samsamfire/gocanopen/v2/pkg/od"
+	canopen "github.com/maestrohub-labs/gocanopen/v2"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/od"
 	"github.com/stretchr/testify/assert"
 )
 

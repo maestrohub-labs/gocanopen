@@ -5,7 +5,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/samsamfire/gocanopen/v2/pkg/od"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/od"
 )
 
 // Delay before re-sending a block segment that failed because the CAN

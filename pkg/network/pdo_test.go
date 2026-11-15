@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	canopen "github.com/samsamfire/gocanopen/v2"
-	"github.com/samsamfire/gocanopen/v2/pkg/config"
-	"github.com/samsamfire/gocanopen/v2/pkg/nmt"
-	"github.com/samsamfire/gocanopen/v2/pkg/pdo"
+	canopen "github.com/maestrohub-labs/gocanopen/v2"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/config"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/nmt"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/pdo"
 	"github.com/stretchr/testify/assert"
 )
 

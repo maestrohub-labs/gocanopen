@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	canopen "github.com/samsamfire/gocanopen/v2"
-	can "github.com/samsamfire/gocanopen/v2/pkg/can"
+	canopen "github.com/maestrohub-labs/gocanopen/v2"
+	can "github.com/maestrohub-labs/gocanopen/v2/pkg/can"
 )
 
 // Virtual CAN bus implementation with TCP primarily used for testing

@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samsamfire/gocanopen/v2/pkg/node"
-	"github.com/samsamfire/gocanopen/v2/pkg/od"
-	"github.com/samsamfire/gocanopen/v2/pkg/pdo"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/node"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/od"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/pdo"
 	"github.com/stretchr/testify/assert"
 )
 

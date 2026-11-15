@@ -3,7 +3,7 @@ package config
 import (
 	"log/slog"
 
-	"github.com/samsamfire/gocanopen/v2/pkg/sdo"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/sdo"
 )
 
 // NodeConfigurator provides helper methods for

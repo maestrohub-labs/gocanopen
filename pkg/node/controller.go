@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/samsamfire/gocanopen/v2/pkg/nmt"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/nmt"
 )
 
 // [NodeProcessor] is responsible for handling the node

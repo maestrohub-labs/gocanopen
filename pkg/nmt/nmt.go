@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
-	canopen "github.com/samsamfire/gocanopen/v2"
-	"github.com/samsamfire/gocanopen/v2/pkg/emergency"
-	"github.com/samsamfire/gocanopen/v2/pkg/od"
+	canopen "github.com/maestrohub-labs/gocanopen/v2"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/emergency"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/od"
 )
 
 const (

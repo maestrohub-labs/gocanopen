@@ -5,10 +5,10 @@ import (
 	"net/http"
 	"regexp"
 
-	"github.com/samsamfire/gocanopen/v2/pkg/gateway"
-	"github.com/samsamfire/gocanopen/v2/pkg/network"
-	"github.com/samsamfire/gocanopen/v2/pkg/nmt"
-	"github.com/samsamfire/gocanopen/v2/pkg/od"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/gateway"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/network"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/nmt"
+	"github.com/maestrohub-labs/gocanopen/v2/pkg/od"
 )
 
 const API_VERSION = "1.0"
