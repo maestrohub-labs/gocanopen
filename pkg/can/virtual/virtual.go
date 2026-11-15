@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"sync"
@@ -27,8 +26,6 @@ func init() {
 const (
 	// How long to wait for a new frame
 	pollTimeout = 200 * time.Millisecond
-	// How long to wait for the remaining bytes of a frame
-	frameTimeout = 1 * time.Second
 	// How long to wait for a frame to start being sent
 	sendTimeout = 10 * time.Millisecond
 	// How long to wait before trying to take the lock again
@@ -52,6 +49,11 @@ type Bus struct {
 	wg            sync.WaitGroup
 	isRunning     bool
 	errSubscriber bool
+	// Bytes received that do not make a whole frame yet
+	rxBuf   []byte
+	rxChunk [256]byte
+	// The rest of a frame the send deadline cut short, sent before any other
+	txPending []byte
 }
 
 func NewVirtualCanBus(channel string) (canopen.Bus, error) {
@@ -94,6 +96,8 @@ func (b *Bus) Connect(...any) error {
 		return err
 	}
 	b.conn = conn
+	b.rxBuf = b.rxBuf[:0]
+	b.txPending = b.txPending[:0]
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		err := tcpConn.SetNoDelay(true)
 		if err != nil {
@@ -135,26 +139,32 @@ func (b *Bus) Send(frame canopen.Frame) error {
 	return nil
 }
 
-// Write one serialized frame, whole or not at all. TCP is a stream : a frame
-// cut short by the deadline would make the peer read the rest of it as the
-// next frame's length. So a frame that has started is finished within
-// [frameTimeout], and the connection is closed if even that fails. sendMu keeps
-// frames sent from different go routines from interleaving.
+// Write one serialized frame without ever putting the stream out of sync.
+// TCP is a stream : a frame cut short by the send deadline would make the peer
+// read the next frame's bytes as the rest of it. So the rest of a frame cut
+// short is kept, and written before any other frame : a frame is never
+// interleaved with another nor left partial, and a slow peer never ends the
+// connection. A frame that cannot start (the peer is not reading, or an
+// earlier frame is still being finished) is dropped whole with an error.
+// sendMu keeps frames sent from different go routines in order.
 func (b *Bus) writeFrame(frameBytes []byte) error {
 	b.sendMu.Lock()
 	defer b.sendMu.Unlock()
 	_ = b.conn.SetWriteDeadline(time.Now().Add(sendTimeout))
+	if len(b.txPending) > 0 {
+		n, err := b.conn.Write(b.txPending)
+		b.txPending = b.txPending[n:]
+		if err != nil {
+			return fmt.Errorf("an earlier frame is still being sent, frame dropped : %w", err)
+		}
+	}
 	n, err := b.conn.Write(frameBytes)
-	if err == nil || n == 0 {
-		// Sent whole, or not at all : the stream is still in sync
-		return err
+	if err != nil && n > 0 {
+		// Started : the rest goes out ahead of the next frame
+		b.txPending = append(b.txPending[:0], frameBytes[n:]...)
+		return nil
 	}
-	_ = b.conn.SetWriteDeadline(time.Now().Add(frameTimeout))
-	if _, err := b.conn.Write(frameBytes[n:]); err != nil {
-		_ = b.conn.Close()
-		return fmt.Errorf("frame cut short after %v of %v bytes, connection closed : %w", n, len(frameBytes), err)
-	}
-	return nil
+	return err
 }
 
 // "Subscribe" implementation of Bus interface
@@ -173,40 +183,57 @@ func (b *Bus) Subscribe(framehandler canopen.FrameListener) error {
 	return nil
 }
 
-// Receive new CAN message. [ErrNoMsg] is returned when no message was received
-// before the polling deadline, which is not an error condition.
+// Receive new CAN message. [ErrNoMsg] is returned when no whole frame was
+// received before the polling deadline, which is not an error condition.
+//
+// TCP is a stream : a frame can arrive split in several segments, or late
+// part way through, and several frames can arrive in one segment. Bytes that
+// do not make a whole frame yet are kept for the next call, so a split or slow
+// frame never ends the reception routine nor puts the stream out of sync, and
+// each call still returns within the polling deadline.
 func (b *Bus) Recv() (*canopen.Frame, error) {
 	if b.conn == nil {
 		return nil, fmt.Errorf("error : no active connection, abort receive")
 	}
-	headerBytes := make([]byte, 4)
-
-	// Poll for the first byte of a frame. Nothing has been consumed from the
-	// stream yet, so a timeout here only means that no frame was received.
+	if frame, err := b.popFrame(); frame != nil || err != nil {
+		return frame, err
+	}
 	_ = b.conn.SetReadDeadline(time.Now().Add(pollTimeout))
-	if _, err := io.ReadFull(b.conn, headerBytes[:1]); err != nil {
-		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-			return nil, ErrNoMsg
-		}
-		return nil, err
+	n, err := b.conn.Read(b.rxChunk[:])
+	b.rxBuf = append(b.rxBuf, b.rxChunk[:n]...)
+	if frame, perr := b.popFrame(); frame != nil || perr != nil {
+		return frame, perr
 	}
+	if err == nil {
+		// Part of a frame, the rest comes with a later call
+		return nil, ErrNoMsg
+	}
+	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		return nil, ErrNoMsg
+	}
+	return nil, err
+}
 
-	// The rest of the frame is already on its way, it is written in a single
-	// call. TCP can still split it accross segments, so it has to be read until
-	// complete.
-	_ = b.conn.SetReadDeadline(time.Now().Add(frameTimeout))
-	if _, err := io.ReadFull(b.conn, headerBytes[1:]); err != nil {
-		return nil, fmt.Errorf("error reading frame length : %w", err)
+// Take one whole frame off the front of the receive buffer, nil if there is
+// none yet
+func (b *Bus) popFrame() (*canopen.Frame, error) {
+	if len(b.rxBuf) < 4 {
+		return nil, nil
 	}
-	length := binary.BigEndian.Uint32(headerBytes)
+	length := binary.BigEndian.Uint32(b.rxBuf[:4])
 	if length > maxFrameLength {
 		return nil, fmt.Errorf("announced frame length %v exceeds %v", length, maxFrameLength)
 	}
-	frameBytes := make([]byte, length)
-	if _, err := io.ReadFull(b.conn, frameBytes); err != nil {
-		return nil, fmt.Errorf("error reading frame of length %v : %w", length, err)
+	end := 4 + int(length)
+	if len(b.rxBuf) < end {
+		return nil, nil
 	}
-	return deserializeFrame(frameBytes)
+	frame, err := deserializeFrame(b.rxBuf[4:end])
+	b.rxBuf = b.rxBuf[end:]
+	if err != nil {
+		return nil, err
+	}
+	return frame, nil
 }
 
 // Handle incoming traffic
