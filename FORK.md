@@ -1,7 +1,18 @@
 # MaestroHub fork of `gocanopen/v2`
 
-This is a fork of [`github.com/samsamfire/gocanopen`](https://github.com/samsamfire/gocanopen)
-`v2.0.1`, re-published as `github.com/maestrohub-labs/gocanopen/v2`.
+This is a fork of [`github.com/samsamfire/gocanopen`](https://github.com/samsamfire/gocanopen),
+re-published as `github.com/maestrohub-labs/gocanopen/v2`.
+
+## Base
+
+Upstream `main` at `c76d0120325fb9ce2f1de1fa421708b990b58ff8`
+("fix: send current UTC time from TIME producer", 2026-11-13), which is
+upstream `v2.1.1` plus 10 commits. The fork's history starts from that commit:
+our changes are the commits on top of it.
+
+Earlier releases (`v2.0.1-mh.1` to `v2.0.1-mh.4`) were based on upstream
+`v2.0.1`, with upstream's PDO and SYNC fixes cherry-picked. Upstream `main`
+contains every one of those cherry-picks, so they are no longer carried.
 
 ## License
 
@@ -11,92 +22,100 @@ as MIT requires. Our modifications below are likewise MIT.
 
 ## Why this fork exists
 
-The upstream `v2` module's CAN-transport aggregator
-(`pkg/can/all/all.go`) blank-imports `pkg/can/kvaser`. The Kvaser transport's
-Windows implementation (`pkg/can/kvaser/kvaser_windows.go`, build-tagged
-`//go:build windows`) imports the **v1** module
-`github.com/samsamfire/gocanopen`, which is licensed **GPL-3.0**.
+Up to `v2.0.1`, the upstream `v2` module's CAN-transport aggregator
+(`pkg/can/all/all.go`) blank-imported `pkg/can/kvaser`, whose Windows
+implementation (`kvaser_windows.go`, `//go:build windows`) imported the **v1**
+module `github.com/samsamfire/gocanopen`, which is licensed **GPL-3.0**. Any
+Windows binary importing `pkg/network` pulled GPL-3.0 code in, which a
+closed-source product distributed as a binary cannot ship. See MaestroHub issue
+#2662 for the full analysis.
 
-As a result, any binary built for Windows that transitively imports
-`pkg/network` (which `all` is imported by) pulls GPL-3.0 code into the binary.
-For a closed-source commercial product distributed as a downloadable binary,
-this is a licensing violation. Linux/macOS builds are unaffected because the
-non-Windows Kvaser file (`kvaser.go`, `//go:build !windows`) is an empty stub.
+Upstream has since ported the Kvaser transport to v2 (`08d78a67e`): it no
+longer imports v1. Upstream's `go.mod` still requires
+`github.com/samsamfire/gocanopen v1.4.4` although no package imports it.
 
-See MaestroHub issue #2662 for the full analysis.
+## What we carry
 
-## Changes from upstream `v2.0.1`
+1. **Module path renamed** to `github.com/maestrohub-labs/gocanopen/v2`, in
+   `go.mod` and every import. `go mod tidy` drops upstream's stale require on
+   the v1 module: `github.com/samsamfire/gocanopen` (v1) is in neither `go.mod`
+   nor `go.sum`.
+2. **The `kvaser` transport is removed** (`pkg/can/kvaser/`), with its blank
+   import in `pkg/can/all/all.go`. MaestroHub does not use it. Upstream's later
+   Kvaser fixes (`08d78a67e`, `9217b91db`, `d4d89578e`, `6578b02ae`) are not
+   carried.
+3. **VirtualCAN stream** (`pkg/can/virtual`, first released in
+   `v2.0.1-mh.2` and `v2.0.1-mh.3`). The TCP stream is read and written so that
+   a split, coalesced or slow frame never ends the connection nor puts the
+   stream out of sync:
+   - `Recv` keeps a partly arrived frame in `rxBuf` (`popFrame`) and completes
+     it on a later call, returning `ErrNoMsg` within the 200 ms poll. Upstream
+     gives the rest of a frame 1 s, then ends the reception routine.
+   - `writeFrame` sends under `sendMu`. The rest of a frame the 10 ms send
+     deadline cut short is kept in `txPending` and written before any other
+     frame. A frame that cannot start is dropped whole with an error. Upstream
+     can cut a frame short, which puts the stream out of sync.
+   - Tests: `TestRecvKeepsAFrameThatStallsPartWay`,
+     `TestSendFinishesAFrameCutShort`,
+     `TestSendKeepsTheStreamInSyncWhenThePeerStalls`,
+     `TestSendDropsAFrameThatNeverStarted`,
+     `TestSendConcurrentFramesStayInSync`, and the `recvFrame` helper.
+4. **The size of an SDO upload is read from four bytes.** In a block upload's
+   initiate response, the SDO client took the size the server indicates from one
+   byte (`GetBlockSize()`, `raw[4]`) instead of four (`raw[4:8]`, CiA 301). An
+   object of 256 bytes or more, read with block transfer (`SDOClient.ReadAll`),
+   was taken for a shorter one and aborted `0x06070012` (length too high). The
+   client now uses `GetSizeIndicated()`; `GetBlockSize()` stays for the one-byte
+   block count. Test: `TestClientBlockUploadIndicatedSize` (255 to 999 bytes; 300
+   and 600 abort without the fix).
 
-1. **Module path renamed** to `github.com/maestrohub-labs/gocanopen/v2`
-   (all internal import paths updated accordingly).
-2. **Removed the `kvaser` transport package** (`pkg/can/kvaser/`) and dropped
-   its blank import from `pkg/can/all/all.go`. This eliminates the only path
-   through which the GPL-3.0 `gocanopen` v1 module entered the build graph.
+## What diverges from upstream
 
-   This removes **no working capability**: in upstream `v2`, the Kvaser
-   transport registers itself into the **v1** transport registry
-   (`github.com/samsamfire/gocanopen/pkg/can`), while `v2`'s
-   `network.NewBus` only ever reads the **v2** registry
-   (`.../v2/pkg/can`). The two are distinct maps in distinct modules, and the
-   Kvaser constructor returns a v1 `Bus` type that is not assignable to v2's.
-   `NewBus("kvaser", …)` in upstream `v2` therefore returns
-   `"not enabled: kvaser, check build flags"` — i.e. the transport never
-   functioned in `v2` on any platform.
+Everything else is upstream `main` unchanged. These files differ:
 
-## Fixes carried beyond upstream `v2.0.1`
+| Path | Difference |
+| --- | --- |
+| `go.mod`, `go.sum` | module path; no v1 require |
+| every `*.go` import | module path |
+| `pkg/can/kvaser/` | removed |
+| `pkg/can/all/all.go` | no kvaser import; fork note |
+| `pkg/can/virtual/virtual.go`, `virtual_test.go` | our VirtualCAN stream changes |
+| `pkg/sdo/common.go`, `pkg/sdo/client.go`, `pkg/network/client_test.go` | the upload size read from four bytes |
+| `FORK.md` | this file |
 
-### VirtualCAN stream (`v2.0.1-mh.2`, `v2.0.1-mh.3`)
+## Tests
 
-`pkg/can/virtual` reads and writes the TCP stream so that a split, coalesced or
-slow frame never ends the connection nor puts the stream out of sync.
+The `pkg/network` tests need a virtualcan server on `localhost:18888`: any
+server that relays each length-prefixed frame (a 4-byte big-endian length, then
+the body) to every other client.
 
-- Upstream's reception fix (`06e9969e2`) is included.
-- On top of it, our own changes:
-  - Frames are sent whole, under a send lock.
-  - The rest of a frame the send deadline cut short is written before any other frame.
-  - The reader keeps a partly arrived frame for its next call, instead of
-    upstream's 1 s frame deadline, which ends the reception routine.
+## Known upstream issues (not fixed here)
 
-This part **diverges from upstream**: upstream still has the 1 s frame deadline
-and a send deadline that can cut frames short. When upgrading, keep our
-`Recv`/`writeFrame` and their tests (`TestRecvKeepsAFrameThatStallsPartWay`,
-`TestSendFinishesAFrameCutShort`, `TestSendKeepsTheStreamInSyncWhenThePeerStalls`).
+- `TestNmt/reset_comm_when_stopped` fails on upstream `main` itself since
+  `14a1a9da6` ("fix: restart NMT on reset communication"): a node now restarts
+  its NMT on reset communication and boots back to OPERATIONAL, while the test
+  still expects it to stay STOPPED.
+- `TestSyncConsumer` and `TestHBConfigurator` (`pkg/network`) fail under
+  `-race`. The races are in the tests: a `bytes.Buffer` log sink read while the
+  logger writes to it, and a package-level slice appended from the EMCY
+  callback.
 
-### PDO and SYNC fixes from upstream (`v2.0.1-mh.4`)
+## Re-enabling Kvaser (future work)
 
-Every upstream commit since `v2.0.1` that touches `pkg/pdo` or `pkg/sync`,
-cherry-picked in order (`-x`, import paths rewritten). They include the fix for
-a data race between `TPDO.Stop` and the SYNC handler (`1f72e2a37`). They also
-bring the regression tests these fixes came with, in `pkg/network/pdo_test.go`.
-
-- `pkg/pdo`, `pkg/sync` and `pkg/network/pdo_test.go` are identical to upstream
-  at `b7559c4c4`, apart from the import path.
-- Two fixes from outside those packages are included because the PDO tests need
-  them: `96e2cbb63` (`pkg/od/streamer.go`, clearing a mapping with dummy entries)
-  and `76a13ceb6` (`pkg/emergency`, error status bits).
-- `eaed4d99f` is included for its `pkg/sync` part only. Its `pkg/nmt` and
-  `pkg/time` parts build on upstream NMT and TIME changes this fork does not
-  carry.
-
-Not taken: upstream's other fixes (SDO block transfers, chunked OD access, NMT,
-TIME, EMCY producer) and its event-driven SDO client. Take them with a move to a
-newer upstream release.
-
-The network tests need a virtualcan server on `localhost:18888`: any server that
-relays each length-prefixed frame to the other clients.
-
-## Re-enabling real Windows CAN hardware (future work)
-
-If real CAN-hardware support on Windows is needed, re-implement the Kvaser (or
-PCAN, etc.) transport against **v2's own** `pkg/can` registry and `Bus`/`Frame`
-types — without importing the GPL-3.0 v1 module — and re-add it to
-`pkg/can/all/all.go` under a `//go:build windows` tag.
+Upstream's Kvaser transport now builds against v2 only. To re-enable it, take
+upstream's `pkg/can/kvaser/` and its import in `pkg/can/all/all.go`, review it
+for licensing again, and confirm the v1 module stays out of `go.mod` and
+`go.sum`.
 
 ## Upgrading the fork
 
-When bumping to a newer upstream `gocanopen/v2`:
-1. Re-apply the two changes above, and our VirtualCAN stream changes
-   (see "Fixes carried beyond upstream").
-2. Re-run `go mod tidy` and confirm `github.com/samsamfire/gocanopen` (v1)
+1. Branch from the new upstream commit.
+2. Re-apply "What we carry": one commit for the rename and the Kvaser removal,
+   then our VirtualCAN commits (cherry-pick them; upstream's `virtual.go` may
+   have changed), then this file.
+3. Run `go mod tidy` and confirm `github.com/samsamfire/gocanopen` (v1)
    appears in neither `go.mod` nor `go.sum`.
-3. Tag a new `v2.x.y-mh.N` release and bump the require in the maestrohub repo.
+4. Run `go build ./...`, `go vet ./...`, `go test ./...` (with the relay), and
+   `go test -race` on `pkg/can/virtual` and `pkg/network`.
+5. Tag a new `v2.x.y-mh.N` release and bump the require in the maestrohub repo.
+   Push only our own tags: the clone also holds upstream's tags.

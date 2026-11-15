@@ -53,6 +53,12 @@ func (node *RemoteNode) Stop() error {
 	if node.sync != nil {
 		node.sync.Stop()
 	}
+	for _, tpdo := range node.tpdos {
+		tpdo.Stop()
+	}
+	for _, rpdo := range node.rpdos {
+		rpdo.Stop()
+	}
 	return nil
 }
 
@@ -88,13 +94,19 @@ func NewRemoteNode(
 		return nil, err
 	}
 	node.client = client
+
+	// Add empty EMCY, only used for logging for now
+	// in particular any errors that would have generated an emergency message
+	// for a "local node" will log errors.
+	node.emcyForLogging = emergency.NewEMCYForLogging(logger)
+
 	// Create a new SYNC object
 	node.od.AddSYNC()
 	// Initialize SYNC
 	sync, err := sync.NewSYNC(
 		bm,
 		logger,
-		nil,
+		node.emcyForLogging, // Empty emergency object used for logging
 		node.od.Index(0x1005),
 		node.od.Index(0x1006),
 		node.od.Index(0x1007),
@@ -105,11 +117,6 @@ func NewRemoteNode(
 		return nil, err
 	}
 	node.sync = sync
-
-	// Add empty EMCY, only used for logging for now
-	// in particular any errors that would have generated an emergency message
-	// for a "local node" will log errors.
-	node.emcyForLogging = emergency.NewEMCYForLogging(logger)
 
 	return node, nil
 }

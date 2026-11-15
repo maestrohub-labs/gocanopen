@@ -8,8 +8,14 @@ import (
 	"github.com/maestrohub-labs/gocanopen/v2/pkg/od"
 )
 
+// Delay before re-sending a block segment that failed because the CAN
+// tx queue was full
+const txBusyRetryDelay = 500 * time.Microsecond
+
 type sdoRawReadWriter struct {
 	client *SDOClient
+	// Upload is finished, remaining data is only in the fifo
+	uploadDone bool
 }
 
 // Create a new raw SDO reader
@@ -58,27 +64,48 @@ func (client *SDOClient) NewRawWriter(nodeId uint8, index uint16, subindex uint8
 // Read bytes from remote node using sdo client
 func (rw *sdoRawReadWriter) Read(b []byte) (n int, err error) {
 	client := rw.client
+	if rw.uploadDone {
+		return rw.readRemaining(b)
+	}
 	n = 0
+	last := time.Now()
 
 	for {
-		ret, err := client.upload(uint32(DefaultClientProcessPeriod.Microseconds()), false, nil, nil)
+		elapsed := time.Since(last)
+		last = time.Now()
+
+		ret, err := client.upload(uint32(elapsed.Microseconds()), false, nil, nil)
 		switch {
 		case err != nil:
 			return n, err
-		case ret == uploadDataFull:
-			// Fifo needs emptying
-			n += client.fifo.Read(b[n:], nil)
 		case ret == success:
-			// Read finished successfully, empty fifo one last time and return EOF
+			// Read finished successfully, empty fifo
+			rw.uploadDone = true
+			m, err := rw.readRemaining(b[n:])
+			return n + m, err
+		case ret == uploadDataFull:
+			// Fifo needs emptying, then process again straight away
 			n += client.fifo.Read(b[n:], nil)
-			return n, io.EOF
+			if n >= len(b) {
+				return n, nil
+			}
+		case ret == waitingLocalTransfer:
+			// Local transfer, nothing to wait for
+		default:
+			// Waiting for the server
+			client.waitEvent(ret)
 		}
-		// If no more space in buffer return
-		if n >= len(b) {
-			return n, err
-		}
-		time.Sleep(client.processingPeriod)
 	}
+}
+
+// Empty the fifo once the upload is finished. b may be too small to hold
+// everything left, so EOF is only returned once the fifo is empty.
+func (rw *sdoRawReadWriter) readRemaining(b []byte) (int, error) {
+	n := rw.client.fifo.Read(b, nil)
+	if rw.client.fifo.GetOccupied() > 0 {
+		return n, nil
+	}
+	return n, io.EOF
 }
 
 // Read a given index/subindex from node into data
@@ -121,9 +148,13 @@ func (rw *sdoRawReadWriter) Write(b []byte) (n int, err error) {
 	if n < len(b) {
 		bufferPartial = true
 	}
+	last := time.Now()
 	for {
+		elapsed := time.Since(last)
+		last = time.Now()
+
 		ret, err := client.downloadMain(
-			uint32(DefaultClientProcessPeriod.Microseconds()),
+			uint32(elapsed.Microseconds()),
 			false,
 			bufferPartial,
 			&nUint32,
@@ -132,16 +163,28 @@ func (rw *sdoRawReadWriter) Write(b []byte) (n int, err error) {
 		switch {
 		case err != nil:
 			return int(nUint32), err
-		case ret == blockDownloadInProgress && bufferPartial:
-			// Fill buffer whilst block download in progress
-			n += client.fifo.Write(b[n:], nil)
-			if n == len(b) {
-				bufferPartial = false
-			}
 		case ret == success:
 			return int(nUint32), err
+		case ret == blockDownloadInProgress:
+			// Fill buffer whilst block download in progress
+			if bufferPartial {
+				n += client.fifo.Write(b[n:], nil)
+				if n == len(b) {
+					bufferPartial = false
+				}
+			}
+			if client.processingPeriod > 0 {
+				time.Sleep(client.processingPeriod)
+			}
+		case ret == transmitBufferFull:
+			// CAN tx queue is full, give it some time to empty
+			time.Sleep(max(client.processingPeriod, txBusyRetryDelay))
+		case ret == waitingLocalTransfer:
+			// Local transfer, nothing to wait for
+		default:
+			// Waiting for the server
+			client.waitEvent(ret)
 		}
-		time.Sleep(client.processingPeriod)
 	}
 }
 

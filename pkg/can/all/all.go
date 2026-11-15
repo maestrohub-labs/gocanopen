@@ -2,13 +2,12 @@ package all
 
 import (
 	// NOTE (maestrohub fork): the upstream kvaser transport is intentionally
-	// omitted. Its Windows implementation (kvaser_windows.go) imports
-	// github.com/samsamfire/gocanopen v1.x, which is GPL-3.0 — incompatible with
-	// shipping a closed-source binary. The transport is also non-functional in
-	// v2 regardless (it registers into v1's transport registry, which v2's
-	// network.NewBus never reads), so dropping it removes no working capability.
-	// See maestrohub issue #2662. Real Windows CAN-hardware support, if needed,
-	// must be re-implemented against v2's own can registry/types (no v1 import).
+	// omitted. Up to v2.0.1 its Windows implementation (kvaser_windows.go)
+	// imported github.com/samsamfire/gocanopen v1.x, which is GPL-3.0, and
+	// registered into v1's transport registry. Upstream has since ported it to
+	// v2 (08d78a67e), but this fork keeps it out: MaestroHub does not use it,
+	// and leaving it out keeps the v1 module out of go.mod and go.sum. See
+	// maestrohub issue #2662 and FORK.md.
 	_ "github.com/maestrohub-labs/gocanopen/v2/pkg/can/socketcanring"
 	_ "github.com/maestrohub-labs/gocanopen/v2/pkg/can/socketcanv2"
 	_ "github.com/maestrohub-labs/gocanopen/v2/pkg/can/socketcanv3"

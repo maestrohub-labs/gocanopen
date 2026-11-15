@@ -43,9 +43,10 @@ type SDOClient struct {
 	sizeIndicated              uint32
 	sizeTransferred            uint32
 	state                      internalState
-	processingPeriod           time.Duration
+	processingPeriod           time.Duration // pacing between block download segments
 	fifo                       *fifo.Fifo
 	rxNew                      bool
+	rxSignal                   chan struct{} // wakes up a blocked transfer on rx
 	response                   SDOMessage
 	toggle                     uint8
 	timeoutTimeUs              uint32
@@ -72,6 +73,7 @@ func (c *SDOClient) Handle(frame canopen.Frame) {
 			// Copy data in response
 			c.response.raw = frame.Data
 			c.rxNew = true
+			c.notify()
 		} else if c.state == stateUploadBlkSubblockSreq {
 			state := stateUploadBlkSubblockSreq
 			seqno := frame.Data[0] & 0x7F
@@ -108,10 +110,54 @@ func (c *SDOClient) Handle(frame canopen.Frame) {
 			if state != stateUploadBlkSubblockSreq {
 				c.rxNew = false
 				c.state = state
+				c.notify()
 			}
 		}
 	}
 
+}
+
+// Wake up the transfer waiting in [SDOClient.waitEvent], if any.
+// Never blocks, a pending notification is enough.
+func (c *SDOClient) notify() {
+	select {
+	case c.rxSignal <- struct{}{}:
+	default:
+	}
+}
+
+// Discard a pending notification left over from a previous transfer
+func (c *SDOClient) clearNotify() {
+	select {
+	case <-c.rxSignal:
+	default:
+	}
+}
+
+// Block until something happens that the state machine should process :
+// a frame was received, or the relevant timeout expired.
+// Spurious wake ups are harmless, the state machine checks rxNew.
+func (c *SDOClient) waitEvent(ret uint8) {
+	c.mu.Lock()
+	remainingUs := remaining(c.timeoutTimeUs, c.timeoutTimer)
+	if ret == blockUploadInProgress {
+		remainingUs = min(remainingUs, remaining(c.timeoutTimeBlockTransferUs, c.timeoutTimerBlock))
+	}
+	c.mu.Unlock()
+
+	timer := time.NewTimer(time.Duration(remainingUs) * time.Microsecond)
+	defer timer.Stop()
+	select {
+	case <-c.rxSignal:
+	case <-timer.C:
+	}
+}
+
+func remaining(timeout uint32, elapsed uint32) uint32 {
+	if elapsed >= timeout {
+		return 0
+	}
+	return timeout - elapsed
 }
 
 func (c *SDOClient) send(frame canopen.Frame) error {
@@ -177,6 +223,7 @@ func (c *SDOClient) downloadSetup(index uint16, subindex uint8, sizeIndicated ui
 	c.sizeTransferred = 0
 	c.finished = false
 	c.timeoutTimer = 0
+	c.timeoutTimerBlock = 0
 	c.fifo.Reset()
 
 	// Select transfer type
@@ -193,6 +240,7 @@ func (c *SDOClient) downloadSetup(index uint16, subindex uint8, sizeIndicated ui
 		c.state = stateDownloadInitiateReq
 	}
 	c.rxNew = false
+	c.clearNotify()
 	return nil
 }
 
@@ -400,9 +448,14 @@ func (c *SDOClient) downloadMain(
 			c.state = stateDownloadBlkInitiateRsp
 
 		case stateDownloadBlkSubblockReq:
-			abortCode = c.downloadBlock(bufferPartial)
+			var txBusy bool
+			txBusy, abortCode = c.downloadBlock(bufferPartial)
 			if abortCode != nil {
 				c.state = stateAbort
+			} else if txBusy {
+				// Segment was not sent, caller should retry later.
+				// Timeout keeps running, so a dead bus ends in AbortTimeout.
+				ret = transmitBufferFull
 			}
 
 		case stateDownloadBlkEndReq:
@@ -420,7 +473,7 @@ func (c *SDOClient) downloadMain(
 
 		switch c.state {
 		case stateAbort:
-			c.abort(abortCode.(Abort))
+			c.abort(toAbort(abortCode))
 			err = abortCode
 			c.state = stateIdle
 		case stateDownloadBlkSubblockReq:
@@ -619,11 +672,15 @@ func (c *SDOClient) downloadBlockInitiate() error {
 }
 
 // Helper function for downloading a sub-block
-func (c *SDOClient) downloadBlock(bufferPartial bool) error {
+// If the segment could not be sent (e.g. CAN tx queue full), the state
+// is rolled back so that the same segment is sent again on next call and
+// txBusy is returned.
+func (c *SDOClient) downloadBlock(bufferPartial bool) (txBusy bool, abortCode error) {
 	if c.fifo.AltGetOccupied() < BlockSeqSize && bufferPartial {
 		// No data yet
-		return nil
+		return false, nil
 	}
+	seqnoPrev, statePrev, finishedPrev := c.blockSequenceNb, c.state, c.finished
 	c.blockSequenceNb++
 	c.txBuffer.Data[0] = c.blockSequenceNb
 	count := uint32(c.fifo.AltRead(c.txBuffer.Data[1:]))
@@ -631,11 +688,11 @@ func (c *SDOClient) downloadBlock(bufferPartial bool) error {
 	c.sizeTransferred += count
 	if c.sizeIndicated > 0 && c.sizeTransferred > c.sizeIndicated {
 		c.sizeTransferred -= count
-		return AbortDataLong
+		return false, AbortDataLong
 	}
 	if c.fifo.AltGetOccupied() == 0 && !bufferPartial {
 		if c.sizeIndicated > 0 && c.sizeTransferred < c.sizeIndicated {
-			return AbortDataShort
+			return false, AbortDataShort
 		}
 		c.txBuffer.Data[0] |= 0x80
 		c.finished = true
@@ -643,8 +700,15 @@ func (c *SDOClient) downloadBlock(bufferPartial bool) error {
 	} else if c.blockSequenceNb >= c.blockSize {
 		c.state = stateDownloadBlkSubblockRsp
 	}
+	if c.send(c.txBuffer) != nil {
+		// Rewind to the start of this segment within the sub-block
+		c.blockSequenceNb, c.state, c.finished = seqnoPrev, statePrev, finishedPrev
+		c.sizeTransferred -= count
+		c.fifo.AltBegin(int(seqnoPrev) * BlockSeqSize)
+		return true, nil
+	}
 	c.timeoutTimer = 0
-	return c.send(c.txBuffer)
+	return false, nil
 }
 
 // Helper function for end of block
@@ -654,6 +718,15 @@ func (c *SDOClient) downloadBlockEnd() {
 	c.txBuffer.Data[2] = byte(c.blockCRC >> 8)
 	c.timeoutTimer = 0
 	_ = c.send(c.txBuffer)
+}
+
+// Convert an error to the abort code sent on the bus.
+// Errors that are not SDO aborts (e.g. failed CAN send) map to AbortGeneral.
+func toAbort(err error) Abort {
+	if abortCode, ok := err.(Abort); ok {
+		return abortCode
+	}
+	return AbortGeneral
 }
 
 // Create & send abort on bus
@@ -687,7 +760,10 @@ func (c *SDOClient) uploadSetup(index uint16, subindex uint8, blockEnabled bool)
 	c.sizeIndicated = 0
 	c.sizeTransferred = 0
 	c.finished = false
+	c.timeoutTimer = 0
+	c.timeoutTimerBlock = 0
 	c.fifo.Reset()
+	c.rw.uploadDone = false
 	if c.od != nil && c.nodeIdServer == c.nodeId {
 		c.streamer.SetReader(nil)
 		c.state = stateUploadLocalTransfer
@@ -697,6 +773,7 @@ func (c *SDOClient) uploadSetup(index uint16, subindex uint8, blockEnabled bool)
 		c.state = stateUploadInitiateReq
 	}
 	c.rxNew = false
+	c.clearNotify()
 	return nil
 }
 
@@ -932,7 +1009,7 @@ func (c *SDOClient) upload(
 				if (response.raw[0] & 0xF9) == 0xC0 {
 					c.blockCRCEnabled = response.IsCRCEnabled()
 					if (response.raw[0] & 0x02) != 0 {
-						c.sizeIndicated = uint32(response.GetBlockSize())
+						c.sizeIndicated = response.GetSizeIndicated()
 					}
 					c.state = stateUploadBlkInitiateReq2
 					c.logger.Debug("[RX] block upload init",
@@ -964,7 +1041,7 @@ func (c *SDOClient) upload(
 						)
 					} else {
 						if (response.raw[0] & 0x01) != 0 {
-							c.sizeIndicated = uint32(response.GetBlockSize())
+							c.sizeIndicated = response.GetSizeIndicated()
 						}
 						c.toggle = 0x00
 						c.state = stateUploadSegmentReq
@@ -1091,8 +1168,8 @@ func (c *SDOClient) upload(
 			c.txBuffer.Data[3] = c.subindex
 			// Calculate number of block segments from free space
 			count := c.fifo.GetSpace() / BlockSeqSize
-			if count >= BlockMaxSize {
-				count = BlockMaxSize
+			if count >= c.blockMaxSize {
+				count = c.blockMaxSize
 			} else if count == 0 {
 				abortCode = AbortOutOfMem
 				c.state = stateAbort
@@ -1138,8 +1215,8 @@ func (c *SDOClient) upload(
 				}
 				// Calculate number of block segments from remaining space
 				count := c.fifo.GetSpace() / BlockSeqSize
-				if count >= BlockMaxSize {
-					count = BlockMaxSize
+				if count >= c.blockMaxSize {
+					count = c.blockMaxSize
 				} else if c.fifo.GetOccupied() > 0 {
 					ret = uploadDataFull
 					if transferShort {
@@ -1174,7 +1251,7 @@ func (c *SDOClient) upload(
 	if ret == waitingResponse {
 		switch c.state {
 		case stateAbort:
-			c.abort(abortCode.(Abort))
+			c.abort(toAbort(abortCode))
 			err = abortCode
 			c.state = stateIdle
 		case stateUploadBlkSubblockSreq:
@@ -1216,16 +1293,16 @@ func NewSDOClient(
 		return nil, canopen.ErrIllegalArgument
 	}
 
-	c := &SDOClient{bm: bm, logger: logger}
+	c := &SDOClient{bm: bm, logger: logger, rxSignal: make(chan struct{}, 1)}
 	c.od = odict
 	c.nodeId = nodeId
 	c.streamer = &od.Streamer{}
 	c.fifo = fifo.NewFifo(DefaultClientBufferSize + 2)
 	c.localBuffer = make([]byte, DefaultClientBufferSize+2)
 	c.SetTimeout(DefaultClientTimeout)
-	c.SetTimeoutBlockTransfer(DefaultClientTimeout)
+	c.SetTimeoutBlockTransfer(DefaultClientBlockTransferTimeout)
 	c.SetBlockMaxSize(BlockMaxSize)
-	c.SetProcessingPeriod(DefaultClientProcessPeriod)
+	c.SetProcessingPeriod(DefaultClientBlockPacing)
 	rw := &sdoRawReadWriter{
 		client: c,
 	}
@@ -1275,9 +1352,10 @@ func (c *SDOClient) SetTimeoutBlockTransfer(timeoutMs uint32) {
 	c.timeoutTimeBlockTransferUs = timeoutMs * 1000
 }
 
-// Set the processing period for SDO client
-// lower number can increase transfer speeds at the cost
-// of more CPU usage
+// Set the pacing between consecutive segments of a block download.
+// Transfers are event driven, so this does not affect latency of responses.
+// Default is 0 (segments are sent back to back), a small value can help
+// slow servers that drop segments sent too quickly.
 func (c *SDOClient) SetProcessingPeriod(period time.Duration) {
 	c.processingPeriod = period
 }

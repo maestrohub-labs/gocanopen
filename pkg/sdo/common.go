@@ -16,9 +16,15 @@ var ErrInvalidArgs = errors.New("error in arguments")
 type internalState uint8
 
 const (
-	DefaultClientTimeout       = 1_000
+	DefaultClientTimeout = 1_000
+	// Deprecated: the client is event driven and no longer polls.
+	// Use [DefaultClientBlockPacing] / [SDOClient.SetProcessingPeriod].
 	DefaultClientProcessPeriod = 10 * time.Millisecond
-	DefaultClientBufferSize    = 1_000
+	// Default pacing between segments of a block download
+	DefaultClientBlockPacing = 0 * time.Millisecond
+	DefaultClientBufferSize  = 1_000
+	// Should be less than the the standard sdo client & server timeout
+	DefaultClientBlockTransferTimeout = 700
 
 	DefaultServerTimeout          = 1_000
 	ClientProtocolSwitchThreshold = 21
@@ -303,6 +309,12 @@ func (response *SDOMessage) GetToggle() uint8 {
 
 func (response *SDOMessage) GetBlockSize() uint8 {
 	return response.raw[4]
+}
+
+// GetSizeIndicated is the data size an upload initiate response indicates
+// when its s bit is set: four bytes, little endian (CiA 301, bytes 4 to 7)
+func (response *SDOMessage) GetSizeIndicated() uint32 {
+	return binary.LittleEndian.Uint32(response.raw[4:8])
 }
 
 func (response *SDOMessage) GetNumberOfSegments() uint8 {

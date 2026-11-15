@@ -12,21 +12,26 @@ import (
 	"github.com/maestrohub-labs/gocanopen/v2/pkg/od"
 )
 
-// time origin is 1st of jan 1984
-var TimestampOrigin = time.Date(1984, time.January, 1, 0, 0, 0, 0, time.Local)
+// time origin is 1st of jan 1984, midnight UTC
+var TimestampOrigin = time.Date(1984, time.January, 1, 0, 0, 0, 0, time.UTC)
+
+const day = 24 * time.Hour
 
 type TIME struct {
 	bm            *canopen.BusManager
 	logger        *slog.Logger
 	mu            sync.Mutex
+	txMu          sync.Mutex // Serializes producer sends with Stop
 	isConsumer    bool
 	isProducer    bool
-	timeInternal  time.Time
+	timeInternal  time.Time // Time value at timeRef
+	timeRef       time.Time // Local clock reading when timeInternal was set
 	timeProducer  time.Duration
 	timerProducer *time.Timer
 	cobId         uint32
 	isOperational bool
 	rxCancel      func()
+	stopped       bool
 }
 
 // Handle [TIME] related RX CAN frames
@@ -38,7 +43,7 @@ func (t *TIME) Handle(frame canopen.Frame) {
 	}
 
 	if t.isConsumer {
-		t.timeInternal = convertByteToTime(frame.Data)
+		t.setInternalTime(convertByteToTime(frame.Data))
 		t.logger.Debug("setting internal time to", "internal", t.timeInternal.String())
 	}
 }
@@ -60,6 +65,7 @@ func (t *TIME) OnStateChange(state uint8) {
 func (t *TIME) Start() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.stopped = false
 
 	if t.isConsumer && t.rxCancel == nil {
 		rxCancel, err := t.bm.Subscribe(t.cobId, 0x7FF, false, t)
@@ -69,7 +75,7 @@ func (t *TIME) Start() error {
 		t.rxCancel = rxCancel
 	}
 
-	if t.isProducer {
+	if t.canProduce() {
 		if t.timerProducer == nil {
 			t.timerProducer = time.AfterFunc(t.timeProducer, t.timerProducerHandler)
 		} else {
@@ -85,8 +91,11 @@ func (t *TIME) Start() error {
 }
 
 func (t *TIME) Stop() {
+	t.txMu.Lock()
+	defer t.txMu.Unlock()
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.stopped = true
 	if t.timerProducer != nil {
 		t.timerProducer.Stop()
 	}
@@ -101,25 +110,56 @@ func (t *TIME) Stop() {
 	)
 }
 
+// TIME is only produced in PRE-OPERATIONAL or OPERATIONAL.
+// Caller must hold t.mu
+func (t *TIME) canProduce() bool {
+	return !t.stopped && t.isProducer && t.isOperational
+}
+
 func (t *TIME) timerProducerHandler() {
+	t.txMu.Lock()
+	defer t.txMu.Unlock()
+
 	t.mu.Lock()
+	if !t.canProduce() {
+		t.mu.Unlock()
+		return
+	}
 	frame := canopen.NewFrame(t.cobId, 0, 6)
-	buff := convertTimeToByte(t.timeInternal)
-	frame.Data = buff
+	frame.Data = convertTimeToByte(t.currentTime())
 	t.mu.Unlock()
+
 	err := t.bm.Send(frame)
 	if err != nil {
 		t.logger.Warn("failed to send", "err", err)
 	}
-	_ = t.Start()
+
+	t.mu.Lock()
+	if t.canProduce() && t.timerProducer != nil {
+		t.timerProducer.Reset(t.timeProducer)
+	}
+	t.mu.Unlock()
 }
 
-// Sets the internal time
+// Sets the internal time. The internal time then keeps advancing
+// from this value, following the local clock.
 func (t *TIME) SetInternalTime(internalTime time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.timeInternal = internalTime
+	t.setInternalTime(internalTime)
 	t.logger.Info("setting date", "internal time", t.timeInternal)
+}
+
+// Caller must hold t.mu
+func (t *TIME) setInternalTime(internalTime time.Time) {
+	t.timeInternal = internalTime
+	t.timeRef = time.Now()
+}
+
+// Current internal time : last set value plus elapsed time since.
+// Caller must hold t.mu
+func (t *TIME) currentTime() time.Time {
+	return t.timeInternal.Add(time.Since(t.timeRef))
 }
 
 // Update the producer interval time
@@ -131,11 +171,11 @@ func (t *TIME) SetProducerInterval(interval time.Duration) {
 	_ = t.Start()
 }
 
-// Get the internal time
+// Get the current internal time
 func (t *TIME) InternalTime() time.Time {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.timeInternal
+	return t.currentTime()
 }
 
 // Check if time producer
@@ -195,18 +235,21 @@ func convertByteToTime(data [8]byte) time.Time {
 	}
 	ms := int(binary.LittleEndian.Uint32(data[0:4]) & 0x0FFFFFFF)
 	days := int(binary.LittleEndian.Uint16(data[4:6]))
-	internalTime := TimestampOrigin.AddDate(0, 0, days)
-	return internalTime.Add(time.Duration(ms) * time.Millisecond)
+	return TimestampOrigin.Add(time.Duration(days)*day + time.Duration(ms)*time.Millisecond)
 }
 
 // Convert from [time.Time] to raw []byte
 func convertTimeToByte(t time.Time) [8]byte {
 	var data [8]byte
-	// Get the total number of days since 1st of jan 1984
-	days := uint16(t.Sub(TimestampOrigin).Hours() / 24)
-	// Get number of milliseconds after midnight
-	midnight := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.Local)
-	ms := t.Sub(midnight).Milliseconds()
+	// TIME_OF_DAY is defined in UTC, independent of the local timezone
+	elapsed := t.Sub(TimestampOrigin)
+	if elapsed < 0 {
+		return data
+	}
+	// Total number of days since 1st of jan 1984
+	days := elapsed / day
+	// Number of milliseconds after midnight
+	ms := (elapsed % day).Milliseconds()
 
 	binary.LittleEndian.PutUint32(data[0:4], uint32(ms))
 	binary.LittleEndian.PutUint16(data[4:6], uint16(days))
