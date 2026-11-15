@@ -29,6 +29,8 @@ const (
 	pollTimeout = 200 * time.Millisecond
 	// How long to wait for the remaining bytes of a frame
 	frameTimeout = 1 * time.Second
+	// How long to wait for a frame to start being sent
+	sendTimeout = 10 * time.Millisecond
 	// How long to wait before trying to take the lock again
 	lockRetryDelay = 1 * time.Millisecond
 	// Sanity check on the announced frame length, a serialized frame is 14 bytes
@@ -41,6 +43,7 @@ var ErrNoMsg = errors.New("no message")
 type Bus struct {
 	logger        *slog.Logger
 	mu            sync.Mutex
+	sendMu        sync.Mutex
 	channel       string
 	conn          net.Conn
 	receiveOwn    bool
@@ -127,9 +130,29 @@ func (b *Bus) Send(frame canopen.Frame) error {
 		if err != nil {
 			return err
 		}
-		_ = b.conn.SetWriteDeadline(time.Now().Add(10 * time.Millisecond))
-		_, err = b.conn.Write(frameBytes)
+		return b.writeFrame(frameBytes)
+	}
+	return nil
+}
+
+// Write one serialized frame, whole or not at all. TCP is a stream : a frame
+// cut short by the deadline would make the peer read the rest of it as the
+// next frame's length. So a frame that has started is finished within
+// [frameTimeout], and the connection is closed if even that fails. sendMu keeps
+// frames sent from different go routines from interleaving.
+func (b *Bus) writeFrame(frameBytes []byte) error {
+	b.sendMu.Lock()
+	defer b.sendMu.Unlock()
+	_ = b.conn.SetWriteDeadline(time.Now().Add(sendTimeout))
+	n, err := b.conn.Write(frameBytes)
+	if err == nil || n == 0 {
+		// Sent whole, or not at all : the stream is still in sync
 		return err
+	}
+	_ = b.conn.SetWriteDeadline(time.Now().Add(frameTimeout))
+	if _, err := b.conn.Write(frameBytes[n:]); err != nil {
+		_ = b.conn.Close()
+		return fmt.Errorf("frame cut short after %v of %v bytes, connection closed : %w", n, len(frameBytes), err)
 	}
 	return nil
 }
