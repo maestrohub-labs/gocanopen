@@ -62,6 +62,23 @@ func newPipedVcan(t *testing.T) (*Bus, net.Conn) {
 	return vcan, remote
 }
 
+// Receive until a whole frame arrives. Recv returns [ErrNoMsg] while a frame
+// is only partly there; any other error fails the test.
+func recvFrame(t *testing.T, vcan *Bus) *canopen.Frame {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		frame, err := vcan.Recv()
+		if errors.Is(err, ErrNoMsg) {
+			continue
+		}
+		require.NoError(t, err)
+		return frame
+	}
+	t.Fatal("no whole frame arrived")
+	return nil
+}
+
 // TCP is a stream, a frame can be delivered in several segments. A short read
 // must not be treated as an error, doing so leaves the stream out of sync and
 // permanently kills the reception routine.
@@ -79,9 +96,30 @@ func TestRecvSegmentedFrame(t *testing.T) {
 		}
 	}()
 
-	received, err := vcan.Recv()
+	assert.Equal(t, frame, *recvFrame(t, vcan))
+}
+
+// A frame that stops part way, for longer than any deadline, is kept and
+// completed when the rest arrives, and the next frame is still in sync
+func TestRecvKeepsAFrameThatStallsPartWay(t *testing.T) {
+	vcan, remote := newPipedVcan(t)
+
+	first := canopen.Frame{ID: 0x190, Flags: 0, DLC: 2, Data: [8]byte{0x01, 0x02}}
+	second := canopen.Frame{ID: 0x290, Flags: 0, DLC: 1, Data: [8]byte{0x03}}
+	firstBytes, err := serializeFrame(first)
 	require.NoError(t, err)
-	assert.Equal(t, frame, *received)
+	secondBytes, err := serializeFrame(second)
+	require.NoError(t, err)
+
+	go func() {
+		_, _ = remote.Write(firstBytes[:5])
+		// Longer than any deadline, upstream's 1 s frame deadline included
+		time.Sleep(1300 * time.Millisecond)
+		_, _ = remote.Write(append(firstBytes[5:], secondBytes...))
+	}()
+
+	assert.Equal(t, first, *recvFrame(t, vcan))
+	assert.Equal(t, second, *recvFrame(t, vcan))
 }
 
 // Several frames can also be delivered inside a single segment, none of them
@@ -100,12 +138,8 @@ func TestRecvCoalescedFrames(t *testing.T) {
 		_, _ = remote.Write(append(firstBytes, secondBytes...))
 	}()
 
-	received, err := vcan.Recv()
-	require.NoError(t, err)
-	assert.Equal(t, first, *received)
-	received, err = vcan.Recv()
-	require.NoError(t, err)
-	assert.Equal(t, second, *received)
+	assert.Equal(t, first, *recvFrame(t, vcan))
+	assert.Equal(t, second, *recvFrame(t, vcan))
 }
 
 // An idle connection is not an error, it must stay usable
@@ -123,69 +157,84 @@ func TestRecvNoMessage(t *testing.T) {
 		_, _ = remote.Write(frameBytes)
 	}()
 
-	received, err := vcan.Recv()
-	require.NoError(t, err)
-	assert.Equal(t, frame, *received)
+	assert.Equal(t, frame, *recvFrame(t, vcan))
 }
 
-// A frame that the deadline cuts short is finished, so that the peer does not
-// read the rest of it as the next frame's length
+// A frame that the send deadline cuts short is finished ahead of the next
+// frame, so that the peer does not read the next frame's bytes as its rest
 func TestSendFinishesAFrameCutShort(t *testing.T) {
 	vcan, remote := newPipedVcan(t)
+	peer := newVcan("")
+	peer.conn = remote
 
 	first := canopen.Frame{ID: 0x190, Flags: 0, DLC: 2, Data: [8]byte{0x01, 0x02}}
 	second := canopen.Frame{ID: 0x290, Flags: 0, DLC: 1, Data: [8]byte{0x03}}
-	firstBytes, err := serializeFrame(first)
-	require.NoError(t, err)
-	secondBytes, err := serializeFrame(second)
-	require.NoError(t, err)
 
 	// The peer takes a few bytes of the first frame, then stalls for longer
 	// than the send deadline
-	_ = remote.SetReadDeadline(time.Now().Add(3 * time.Second))
-	got := make(chan []byte, 1)
+	firstBytes, err := serializeFrame(first)
+	require.NoError(t, err)
+	head := make(chan struct{})
 	go func() {
-		buf := make([]byte, len(firstBytes)+len(secondBytes))
-		_, _ = io.ReadFull(remote, buf[:3])
-		time.Sleep(5 * sendTimeout)
-		_, _ = io.ReadFull(remote, buf[3:])
-		got <- buf
+		_ = remote.SetReadDeadline(time.Now().Add(3 * time.Second))
+		_, _ = io.ReadFull(remote, make([]byte, 3))
+		close(head)
 	}()
+	require.NoError(t, vcan.Send(first), "a frame that has started is not an error")
+	<-head
 
-	require.NoError(t, vcan.Send(first))
+	// Once the peer reads again, the rest of the first frame arrives before
+	// the second, and the peer's view of the stream stays in sync
+	got := make(chan *canopen.Frame, 2)
+	go func() {
+		peer.rxBuf = append(peer.rxBuf, firstBytes[:3]...)
+		got <- recvFrame(t, peer)
+		got <- recvFrame(t, peer)
+	}()
 	require.NoError(t, vcan.Send(second))
-	select {
-	case buf := <-got:
-		assert.Equal(t, append(firstBytes, secondBytes...), buf)
-	case <-time.After(5 * time.Second):
-		t.Fatal("frames never reached the peer")
-	}
+	assert.Equal(t, first, *<-got)
+	assert.Equal(t, second, *<-got)
 }
 
-// A frame that cannot be finished closes the connection rather than leaving
-// the stream out of sync
-func TestSendClosesTheConnectionWhenAFrameCannotBeFinished(t *testing.T) {
+// A peer that stalls part way through a frame for long does not end the
+// connection : frames meanwhile are dropped whole, and when the peer reads
+// again the stream is still in sync
+func TestSendKeepsTheStreamInSyncWhenThePeerStalls(t *testing.T) {
 	vcan, remote := newPipedVcan(t)
+	peer := newVcan("")
+	peer.conn = remote
 
-	frame := canopen.Frame{ID: 0x190, Flags: 0, DLC: 2, Data: [8]byte{0x01, 0x02}}
-	read := make(chan error, 1)
+	first := canopen.Frame{ID: 0x190, Flags: 0, DLC: 2, Data: [8]byte{0x01, 0x02}}
+	dropped := canopen.Frame{ID: 0x1A0, Flags: 0, DLC: 1, Data: [8]byte{0xEE}}
+	next := canopen.Frame{ID: 0x290, Flags: 0, DLC: 1, Data: [8]byte{0x03}}
+	firstBytes, err := serializeFrame(first)
+	require.NoError(t, err)
+
+	head := make(chan struct{})
 	go func() {
-		buf := make([]byte, 3)
-		_, _ = io.ReadFull(remote, buf)
-		// Stall longer than frameTimeout, then the connection must be gone
-		time.Sleep(frameTimeout + 200*time.Millisecond)
-		_ = remote.SetReadDeadline(time.Now().Add(time.Second))
-		_, err := remote.Read(make([]byte, 64))
-		read <- err
+		_ = remote.SetReadDeadline(time.Now().Add(3 * time.Second))
+		_, _ = io.ReadFull(remote, make([]byte, 3))
+		close(head)
 	}()
+	require.NoError(t, vcan.Send(first))
+	<-head
 
-	assert.Error(t, vcan.Send(frame))
-	select {
-	case err := <-read:
-		assert.ErrorIs(t, err, io.EOF)
-	case <-time.After(5 * time.Second):
-		t.Fatal("the peer's read never returned")
+	// Nobody reads for well over a second : nothing more can start
+	deadline := time.Now().Add(1200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		assert.Error(t, vcan.Send(dropped))
+		time.Sleep(50 * time.Millisecond)
 	}
+
+	got := make(chan *canopen.Frame, 2)
+	go func() {
+		peer.rxBuf = append(peer.rxBuf, firstBytes[:3]...)
+		got <- recvFrame(t, peer)
+		got <- recvFrame(t, peer)
+	}()
+	require.NoError(t, vcan.Send(next))
+	assert.Equal(t, first, *<-got)
+	assert.Equal(t, next, *<-got)
 }
 
 // A frame that could not start before the deadline is dropped whole, the next
@@ -201,23 +250,10 @@ func TestSendDropsAFrameThatNeverStarted(t *testing.T) {
 
 	peer := newVcan("")
 	peer.conn = remote
-	type result struct {
-		frame *canopen.Frame
-		err   error
-	}
-	received := make(chan result, 1)
-	go func() {
-		frame, err := peer.Recv()
-		received <- result{frame, err}
-	}()
-	require.NoError(t, vcan.Send(next))
-	select {
-	case r := <-received:
-		require.NoError(t, r.err)
-		assert.Equal(t, next, *r.frame)
-	case <-time.After(5 * time.Second):
-		t.Fatal("the next frame never arrived")
-	}
+	sent := make(chan error, 1)
+	go func() { sent <- vcan.Send(next) }()
+	assert.Equal(t, next, *recvFrame(t, peer))
+	require.NoError(t, <-sent)
 }
 
 // Frames sent from several go routines while the peer reads slowly all arrive
